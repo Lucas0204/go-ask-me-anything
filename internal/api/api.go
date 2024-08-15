@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"github.com/Lucas0204/go-ask-me-anything/internal/store/pgstore"
 	"github.com/go-chi/chi/v5"
@@ -121,13 +122,234 @@ func (h apiHandler) handleSubscribeRoom(writer http.ResponseWriter, request *htt
 	h.subsMutex.Unlock()
 }
 
-func (h apiHandler) handleCreateRoom(writer http.ResponseWriter, request *http.Request) {}
-func (h apiHandler) handleGetRooms(writer http.ResponseWriter, request *http.Request)   {}
+func (h apiHandler) handleCreateRoom(writer http.ResponseWriter, request *http.Request) {
+	type _body struct {
+		Theme string `json:"theme"`
+	}
+	var body _body
+	if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+		http.Error(writer, "invalid json", http.StatusBadRequest)
+		return
+	}
 
-func (h apiHandler) handleCreateMessage(writer http.ResponseWriter, request *http.Request)     {}
-func (h apiHandler) handleGetRoomMessages(writer http.ResponseWriter, request *http.Request)   {}
-func (h apiHandler) handleGetRoomMessage(writer http.ResponseWriter, request *http.Request)    {}
-func (h apiHandler) handleReactionToMessage(writer http.ResponseWriter, request *http.Request) {}
-func (h apiHandler) handleRemoveReactionFromMessage(writer http.ResponseWriter, request *http.Request) {
+	roomId, err := h.q.InsertRoom(request.Context(), body.Theme)
+	if err != nil {
+		http.Error(writer, "something went wrong", http.StatusInternalServerError)
+		return
+	}
+
+	type response struct {
+		ID string `json:"id"`
+	}
+
+	data, _ := json.Marshal(response{ID: roomId.String()})
+	writer.Header().Set("Content-Type", "application/json")
+	_, err = writer.Write(data)
+	if err != nil {
+		slog.Error("failed to write response data", "room_id", roomId.String())
+		http.Error(writer, "something went wrong", http.StatusInternalServerError)
+	}
 }
-func (h apiHandler) handleMarkMessageAsAnswered(writer http.ResponseWriter, request *http.Request) {}
+
+func (h apiHandler) handleGetRooms(writer http.ResponseWriter, request *http.Request) {
+	rooms, err := h.q.GetRooms(request.Context())
+	if err != nil {
+		http.Error(writer, "something went wrong", http.StatusInternalServerError)
+		return
+	}
+
+	type response struct {
+		Rooms []pgstore.Room `json:"rooms"`
+	}
+	data, _ := json.Marshal(response{Rooms: rooms})
+	writer.Header().Set("Content-Type", "application/json")
+	_, err = writer.Write(data)
+	if err != nil {
+		slog.Error("failed to write response data to return rooms list")
+		http.Error(writer, "something went wrong", http.StatusInternalServerError)
+	}
+}
+
+func (h apiHandler) handleCreateMessage(writer http.ResponseWriter, request *http.Request) {
+	rawRoomId := chi.URLParam(request, "room_id")
+	roomId, err := uuid.Parse(rawRoomId)
+	if err != nil {
+		http.Error(writer, "invalid room id", http.StatusBadRequest)
+		return
+	}
+
+	type _body struct {
+		Message string `json:"message"`
+	}
+	var body _body
+	if err = json.NewDecoder(request.Body).Decode(&body); err != nil {
+		http.Error(writer, "invalid json", http.StatusBadRequest)
+		return
+	}
+
+	var insertMessageParams = pgstore.InsertMessageParams{RoomID: roomId, Message: body.Message}
+	messageId, err := h.q.InsertMessage(request.Context(), insertMessageParams)
+
+	if err != nil {
+		http.Error(writer, "something went wrong", http.StatusInternalServerError)
+		return
+	}
+
+	type response struct {
+		MessageID uuid.UUID `json:"messageId"`
+	}
+
+	data, _ := json.Marshal(response{MessageID: messageId})
+	writer.Header().Set("Content-Type", "application/json")
+	_, err = writer.Write(data)
+	if err != nil {
+		slog.Error("failed to write response data to return message ID")
+		http.Error(writer, "something went wrong", http.StatusInternalServerError)
+	}
+}
+
+func (h apiHandler) handleGetRoomMessages(writer http.ResponseWriter, request *http.Request) {
+	rawRoomId := chi.URLParam(request, "room_id")
+	roomId, err := uuid.Parse(rawRoomId)
+	if err != nil {
+		http.Error(writer, "invalid room id", http.StatusBadRequest)
+		return
+	}
+
+	messages, err := h.q.GetRoomMessages(request.Context(), roomId)
+	if err != nil {
+		http.Error(writer, "something went wrong", http.StatusInternalServerError)
+		return
+	}
+
+	type response struct {
+		Messages []pgstore.Message `json:"messages"`
+	}
+
+	data, _ := json.Marshal(response{Messages: messages})
+	writer.Header().Set("Content-Type", "application/json")
+	_, err = writer.Write(data)
+	if err != nil {
+		slog.Error("failed to write response data", "room_id", roomId.String())
+		http.Error(writer, "something went wrong", http.StatusInternalServerError)
+	}
+}
+
+func (h apiHandler) handleGetRoomMessage(writer http.ResponseWriter, request *http.Request) {
+	rawRoomId := chi.URLParam(request, "room_id")
+	_, err := uuid.Parse(rawRoomId)
+	if err != nil {
+		http.Error(writer, "invalid room id", http.StatusBadRequest)
+		return
+	}
+
+	rawMessageId := chi.URLParam(request, "message_id")
+	messageId, err := uuid.Parse(rawMessageId)
+	if err != nil {
+		http.Error(writer, "invalid message id", http.StatusBadRequest)
+		return
+	}
+
+	message, err := h.q.GetMessage(request.Context(), messageId)
+
+	type response struct {
+		Message pgstore.Message `json:"message"`
+	}
+
+	data, _ := json.Marshal(response{Message: message})
+	writer.Header().Set("Content-Type", "application/json")
+	_, err = writer.Write(data)
+	if err != nil {
+		slog.Error("failed to write response data", "message_id", messageId.String())
+		http.Error(writer, "something went wrong", http.StatusInternalServerError)
+	}
+}
+
+func (h apiHandler) handleReactionToMessage(writer http.ResponseWriter, request *http.Request) {
+	rawRoomId := chi.URLParam(request, "room_id")
+	_, err := uuid.Parse(rawRoomId)
+	if err != nil {
+		http.Error(writer, "invalid room id", http.StatusBadRequest)
+		return
+	}
+
+	rawMessageId := chi.URLParam(request, "message_id")
+	messageId, err := uuid.Parse(rawMessageId)
+	if err != nil {
+		http.Error(writer, "invalid message id", http.StatusBadRequest)
+		return
+	}
+
+	count, err := h.q.ReactToMessage(request.Context(), messageId)
+	if err != nil {
+		http.Error(writer, "something went wrong", http.StatusInternalServerError)
+		return
+	}
+
+	type response struct {
+		ReactionCount int64 `json:"reactionCount"`
+	}
+
+	data, _ := json.Marshal(response{ReactionCount: count})
+	writer.Header().Set("Content-Type", "application/json")
+	_, err = writer.Write(data)
+	if err != nil {
+		slog.Error("failed to write response data to return reaction count")
+		http.Error(writer, "something went wrong", http.StatusInternalServerError)
+	}
+}
+
+func (h apiHandler) handleRemoveReactionFromMessage(writer http.ResponseWriter, request *http.Request) {
+	rawRoomId := chi.URLParam(request, "room_id")
+	_, err := uuid.Parse(rawRoomId)
+	if err != nil {
+		http.Error(writer, "invalid room id", http.StatusBadRequest)
+		return
+	}
+
+	rawMessageId := chi.URLParam(request, "message_id")
+	messageId, err := uuid.Parse(rawMessageId)
+	if err != nil {
+		http.Error(writer, "invalid message id", http.StatusBadRequest)
+		return
+	}
+
+	count, err := h.q.RemoveReactionFromMessage(request.Context(), messageId)
+	if err != nil {
+		http.Error(writer, "something went wrong", http.StatusInternalServerError)
+		return
+	}
+
+	type response struct {
+		ReactionCount int64 `json:"reactionCount"`
+	}
+
+	data, _ := json.Marshal(response{ReactionCount: count})
+	writer.Header().Set("Content-Type", "application/json")
+	_, err = writer.Write(data)
+	if err != nil {
+		slog.Error("failed to write response data to return reaction count")
+		http.Error(writer, "something went wrong", http.StatusInternalServerError)
+	}
+}
+
+func (h apiHandler) handleMarkMessageAsAnswered(writer http.ResponseWriter, request *http.Request) {
+	rawRoomId := chi.URLParam(request, "room_id")
+	_, err := uuid.Parse(rawRoomId)
+	if err != nil {
+		http.Error(writer, "invalid room id", http.StatusBadRequest)
+		return
+	}
+
+	rawMessageId := chi.URLParam(request, "message_id")
+	messageId, err := uuid.Parse(rawMessageId)
+	if err != nil {
+		http.Error(writer, "invalid message id", http.StatusBadRequest)
+		return
+	}
+
+	err = h.q.MarkMessageAsAnswered(request.Context(), messageId)
+	if err != nil {
+		http.Error(writer, "something went wrong", http.StatusInternalServerError)
+	}
+}
